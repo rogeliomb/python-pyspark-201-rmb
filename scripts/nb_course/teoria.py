@@ -293,7 +293,7 @@ print("count sigue siendo", orders.count())  # 800: tipar ≠ filtrar"""
 
 **Siguiente:** [lab de ingesta](02-lab-ingesta-csv-json.ipynb) — creas tu notebook y cargas las cuatro fuentes.
 
-Cuando termines M02 (schema + calidad), hay un **extra** de JSON anidado y dumps CRM que no coinciden: [M08](../M08-json-anidado-schema/01-teoria.ipynb). No sustituye este módulo."""
+Cuando termines M02 (schema + calidad), hay un **extra** de JSON anidado, dumps CRM que no coinciden, y facturas embebidas: [M08](../M08-json-anidado-schema/01-teoria.ipynb). No sustituye este módulo."""
         ),
     ]
 
@@ -726,6 +726,6 @@ print("enero", enero.count(), "total", spark.read.parquet(str(dest)).count())"""
         md(
             """**Siguiente:** [lab de parquet](02-lab-parquet-layout.ipynb) sobre el fact real.
 
-**Extra (JSON anidado / CRM legacy):** [M08](../M08-json-anidado-schema/01-teoria.ipynb) — no forma parte del Parquet de ventas."""
+**Extra (JSON anidado / CRM legacy / facturas embebidas):** [M08](../M08-json-anidado-schema/01-teoria.ipynb) — no forma parte del Parquet de ventas."""
         ),
     ]

@@ -1,4 +1,4 @@
-"""M08 extra — JSON anidado, roundtrip y schema legacy (teoría montada + lab)."""
+"""M08 extra — JSON anidado, schema legacy y facturas embebidas (teoría montada + labs)."""
 from __future__ import annotations
 
 from .common import (
@@ -39,6 +39,7 @@ NovaShop “tuvo un CRM”:
 |---------|--------|------:|
 | `profiles_v1.jsonl` | Dump **2023**, plano (`fullName`, `country`, `email` string) | **100** (C0001–C0100) |
 | `profiles_v2.jsonl` | Dump **2024**, anidado (`profile.contact.address.geo`…) | **200** (C0051–C0250) |
+| `billing_embedded.jsonl` | Dump de **facturación embebida**: cuenta + array `invoices` (líneas dentro) | **40** (C0001–C0040) |
 
 **50** clientes están en los dos (C0051–C0100): la migración se quedó a medias. v2 trae suciedad: 8 sin `address.country` (el país está en `profile.country`), 6 con `orders_preview` vacío, 5 sin email de trabajo.
 
@@ -229,7 +230,109 @@ print("vienen de v2", profiles.where(col("feed") == "v2").count())  # 200"""
         md(
             """Eso es “resolver el legacy cuando la migración no se hizo bien”: **un contrato interno**, `coalesce` de sitios distintos, y una regla de precedencia (aquí: el dump nuevo pisa al viejo). Spark no “adivina” el CRM; tú fijas qué gana.
 
-**Siguiente:** [lab](02-lab-json-anidado-schema.ipynb) — creas el notebook y repites el flujo (con pruebas). El pipeline de pedidos no cambia."""
+**Lab de esta parte:** [02 JSON anidado y schema](02-lab-json-anidado-schema.ipynb). El pipeline de pedidos no cambia."""
+        ),
+        md(
+            """## Embebido ≠ relacionado (otro dump, misma idea)
+
+Hasta ahora el árbol era *ficha de cliente*. En CMS, Mongo, facturación, CRM “documento”, lo habitual es **meter las facturas dentro de la cuenta**. Un JSON. Cero tabla de facturas. Eso se llama modelo **embebido**.
+
+El modelo **relacionado** es el de M04: `customers.csv` y `orders.csv` son ficheros distintos; el pedido trae `customer_id` y **cruzas**.
+
+| | Relacionado (M04) | Embebido (este dump) |
+|--|-------------------|----------------------|
+| Cómo viene | 2+ ficheros / tablas | **un** JSON por cuenta, con array `invoices` |
+| Dónde está la factura | fila en `orders` | **dentro** de `invoices: [ … ]` |
+| Cómo “cruzas” | `join` | primero **partes** el documento; *después* `join` |
+
+Spark no consulta como Mongo (`cuenta.invoices`). Lees el JSONL (un DataFrame con un `array<struct>`), **montas dos DataFrames** (cuentas + facturas) y **luego** cruzas como en M04. El join no está en el JSON; lo armamos **tras la ingesta**.
+
+Fichero: `data/raw/billing_embedded.jsonl` — **40** cuentas (C0001–C0040). **No** es el fact de pedidos. Extra, como el CRM."""
+        ),
+        md(
+            """## Un documento (cuenta + facturas dentro)
+
+```json
+{
+  "account_id": "C0007",
+  "account": {
+    "legal_name": "Cliente 0007",
+    "vat": "ESB0007",
+    "billing": {"city": "Madrid", "country": "ES"}
+  },
+  "invoices": [
+    {
+      "invoice_id": "F0007-01",
+      "issued": "2024-01-15",
+      "status": "paid",
+      "currency": "EUR",
+      "lines": [{"sku": "P007", "qty": 1, "amount": 10.7}]
+    }
+  ]
+}
+```
+
+Tres suciedades a propósito: **5** cuentas con `invoices: []` (C0001–C0005); **3** facturas con `lines: []` (la de C0006 es una); **4** `vat` nulos (C0001–C0004)."""
+        ),
+        md(
+            """## Demo (juguete): un JSON → dos DataFrames → join
+
+Dos cuentas en memoria. Ana tiene 2 facturas; Luis ninguna. Eso cabe en la cabeza.
+
+Al ejecutar:
+
+- `printSchema`: `account` struct, `invoices` array.
+- `cuentas` = **2** filas (no explotas).
+- `explode` de facturas = **2** filas (Luis **desaparece**).
+- `explode_outer` = **3**.
+- `left` cuentas ⋈ facturas = **3** (Luis sigue, factura nula). `inner` = **2**.
+
+Eso es “montar dos DataFrames y cruzarlos **después** de ingerir el embebido”."""
+        ),
+        code(
+            """from pyspark.sql.functions import col, size, explode, explode_outer
+
+toy = spark.read.json(spark.sparkContext.parallelize([
+    '{"account_id":"A1","account":{"legal_name":"Ana"},"invoices":[{"invoice_id":"F1","total":10.0},{"invoice_id":"F2","total":5.0}]}',
+    '{"account_id":"A2","account":{"legal_name":"Luis"},"invoices":[]}',
+]))
+print("documentos (1 JSON = 1 cuenta)", toy.count())  # 2
+toy.printSchema()
+
+# DataFrame 1: grano CUENTA (el array sigue ahí; no lo explotas)
+cuentas = toy.select(
+    "account_id",
+    col("account.legal_name").alias("legal_name"),
+    size("invoices").alias("n_inv"),
+)
+print("cuentas", cuentas.count())  # 2
+cuentas.show()
+
+# DataFrame 2: grano FACTURA (explode). Luis se cae.
+fact = toy.select("account_id", explode("invoices").alias("inv"))
+print("explode facturas", fact.count())  # 2
+fact.select("account_id", "inv.invoice_id", "inv.total").show()
+
+print("explode_outer", toy.select("account_id", explode_outer("invoices").alias("inv")).count())  # 3
+
+# Tras la ingesta: cruzar como si hubieran venido relacionados
+fact_plana = fact.select(
+    "account_id",
+    col("inv.invoice_id").alias("invoice_id"),
+    col("inv.total").alias("total"),
+)
+left_ = cuentas.join(fact_plana, "account_id", "left")
+inner_ = cuentas.join(fact_plana, "account_id", "inner")
+print("left  cuentas ⋈ facturas", left_.count())    # 3
+print("inner cuentas ⋈ facturas", inner_.count())   # 2
+left_.orderBy("account_id", "invoice_id").show()"""
+        ),
+        md(
+            """**Qué acabas de ver.** El JSON era embebido. Spark no “entra” al array solo. Tú **partes** (cuentas vs facturas) y **cruzas**. El `left` conserva a quien no tiene facturas; el `inner` no.
+
+**Lab de esta parte:** [03 facturas embebidas](03-lab-embedding-facturas.ipynb) — el dump real (`billing_embedded.jsonl`), tres granos (cuenta / factura / línea) y el join tras persistir.
+
+El pipeline `raw` → `fact_lines` **no** usa este fichero."""
         ),
     ]
 
@@ -245,7 +348,7 @@ def lab() -> list:
 
 Hazlo **después** de M02-02 (ya sabes schema y `coalesce`). Si no has generado datos: `python3 scripts/generate_novashop.py`.""",
                 "01-teoria.ipynb",
-                "../M03-transformacion-datos/01-teoria.ipynb",
+                "03-lab-embedding-facturas.ipynb",
             )
         ),
         *paso(
@@ -406,5 +509,287 @@ unk.groupBy("feed").count().show()
                 ]
             )
         ),
-        md(siguiente("../M03-transformacion-datos/01-teoria.ipynb", "M03 — o sigue el extra y vuelve al pipeline")),
+        md(siguiente("03-lab-embedding-facturas.ipynb", "M08-02 facturas embebidas")),
+    ]
+
+
+def lab_embed() -> list:
+    return [
+        md(
+            lab_abre(
+                "M08-02",
+                "Facturas embebidas: partir y cruzar",
+                "M08-02-embedding-facturas.ipynb",
+                """**Extra.** Un dump de facturación trae la factura **dentro** de la cuenta (modelo embebido, no dos CSV). Tras ingerir: montas **dos DataFrames** (cuentas + facturas) y los **cruzas** como en M04.
+
+No toca `fact_lines`. Hazlo después de M08-01 (ya viste `explode`) o, como mínimo, de M02 + la teoría de este módulo.""",
+                "02-lab-json-anidado-schema.ipynb",
+                "../M03-transformacion-datos/01-teoria.ipynb",
+            )
+        ),
+        md(
+            """## Qué queremos conseguir (léelo antes)
+
+En M04 las facturas **no existen**: hay `orders.csv` y `customers.csv`. El pedido trae `customer_id`. Eso es **relacionado**: dos tablas, un join.
+
+En CMS / Mongo / “el JSON que tira facturación”, lo normal es **un documento por cuenta** y, dentro, `invoices: [ … ]`. La factura **no tiene fichero propio**. Eso es **embebido**.
+
+Spark no hace `cuenta.invoices` como un driver de Mongo. El flujo es:
+
+1. **Ingesta** — lees el JSONL. Un DataFrame. Columna `invoices` = array.
+2. **Partir** — un DF a grano cuenta (no explotas) y otro a grano factura (`explode`).
+3. **Cruzar** — `join` por `account_id`, *después*. El JSON ya no está; son tablas.
+
+Si solo haces `show()` del documento, “no demuestra nada”: ves un array y no sabes cuántas facturas hay. La prueba son los **counts de grano** (40 cuentas ≠ 75 facturas ≠ 112 líneas).
+
+El encabezado de los pasos dice “con tus palabras”. **Aquí no.** Copia el bloque y rellena `___`.
+
+Fichero: `data/raw/billing_embedded.jsonl`. Si no está: `python3 scripts/generate_novashop.py`."""
+        ),
+        *paso(
+                "1",
+                "Ingerir el documento (aún embebido)",
+                """Copia y rellena:
+
+```
+Paso 1. Un JSON = una cuenta. invoices es un array, no una tabla.
+docs = ___ filas (40). printSchema: account struct, invoices array.
+vat nulo = ___ (4). Esto todavía NO es un join.
+```
+
+JSONL: **no** uses `multiLine` (eso era el array de productos).""",
+                CELDA_0
+                + """
+
+from pyspark.sql.functions import col, size, explode, explode_outer, sum as fsum
+from paths import ensure_dirs
+
+spark = get_spark("novashop-m08")
+docs = spark.read.json(str(RAW / "billing_embedded.jsonl"))
+print("documentos", docs.count())
+docs.printSchema()
+print("vat nulo", docs.where(col("account.vat").isNull()).count())
+docs.select("account_id", "account.legal_name", size("invoices").alias("n_inv")).show(8)""",
+                "`documentos 40`. Schema con `account` struct e `invoices` array de structs (y `lines` dentro). `vat nulo` **4**.",
+                "Si el schema es todo string y no hay `array`, no es este fichero (o usaste `multiLine`).",
+                if_fail="PATH / 0 filas → `python3 scripts/generate_novashop.py`.",
+            ),
+        *paso(
+                "2",
+                "Mirar tres cuentas **sin** explotar (tres casos)",
+                """El array se ve distinto según la cuenta. Ejecuta y copia:
+
+```
+C0001: invoices = []          → cuenta sin facturas.
+C0006: hay factura, lines []  → factura vacía por dentro (otro grano).
+C0007: factura con al menos una línea.
+```
+
+Esto es el modelo embebido en crudo: **todo en el mismo JSON**.""",
+                """print("=== C0001 (sin facturas) ===")
+docs.where(col("account_id") == "C0001").select("account_id", "invoices").show(truncate=False)
+print("=== C0006 (factura sin líneas) ===")
+docs.where(col("account_id") == "C0006").select("account_id", "invoices").show(truncate=False)
+print("=== C0007 (factura con línea) ===")
+docs.where(col("account_id") == "C0007").select("account_id", "invoices").show(truncate=False)""",
+                "C0001 lista vacía. C0006 un `invoice_id` con `lines=[]`. C0007 trae `sku`/`amount`.",
+                "Si las tres se ven iguales, estás filtrando mal el `account_id`.",
+            ),
+        *paso(
+                "3",
+                "DataFrame 1 — grano **cuenta** (no explotas)",
+                """Copia:
+
+```
+Paso 3. cuentas tiene ___ filas (40), una por JSON.
+n_invoices=0 son ___ (5): C0001–C0005.
+size(invoices) NO duplica filas: seguimos a grano cuenta.
+```
+
+Esto es “la tabla de clientes” que **montarías** si el origen hubiera sido relacionado.""",
+                """cuentas = docs.select(
+    col("account_id"),
+    col("account.legal_name").alias("legal_name"),
+    col("account.vat").alias("vat"),
+    col("account.billing.country").alias("country"),
+    size("invoices").alias("n_invoices"),
+)
+print("cuentas", cuentas.count())
+print("sin facturas", cuentas.where(col("n_invoices") == 0).count())
+cuentas.orderBy("account_id").show(8)""",
+                "`cuentas 40`. `sin facturas` **5**. El `show` lista `n_invoices` 0 en las primeras.",
+                "`size` cuenta elementos del array; no es `explode`.",
+            ),
+        *paso(
+                "4",
+                "DataFrame 2 — grano **factura** (`explode`)",
+                """Copia:
+
+```
+Paso 4. explode(invoices) = ___ filas (75). Distinct cuentas = ___ (35).
+Se cayeron las 5 de invoices [].
+Ese DF es la “tabla de facturas” que no venía en un fichero aparte.
+```
+
+`account_id` se **repite** en cada factura de la misma cuenta: esa es la clave para el join de después.""",
+                """inv_raw = docs.select("account_id", explode("invoices").alias("inv"))
+facturas = inv_raw.select(
+    "account_id",
+    col("inv.invoice_id").alias("invoice_id"),
+    col("inv.issued").alias("issued"),
+    col("inv.status").alias("status"),
+    size("inv.lines").alias("n_lines"),
+)
+print("facturas", facturas.count())
+print("cuentas distintas", facturas.select("account_id").distinct().count())
+print("facturas con 0 líneas", facturas.where(col("n_lines") == 0).count())
+facturas.where(col("account_id").isin("C0006", "C0007", "C0011")).orderBy("account_id", "invoice_id").show(truncate=False)""",
+                "`facturas 75`. Distinct **35**. `n_lines=0` **3** (una es C0006). C0001 **no** sale.",
+                "75 ≠ 40: cambió el grano. Si te da 40, no explotaste.",
+            ),
+        *prueba(
+                "explode vs explode_outer (el left del array)",
+                """Copia:
+
+```
+explode_outer de invoices = ___ (80 = 75 facturas + 5 cuentas vacías).
+Las 5 extra tienen invoice_id nulo. Eso es el left “gratis” del array.
+```""",
+                """outer_inv = docs.select("account_id", explode_outer("invoices").alias("inv"))
+print("explode_outer facturas", outer_inv.count())
+print(
+    "invoice_id nulo",
+    outer_inv.where(col("inv.invoice_id").isNull()).count(),
+)
+outer_inv.where(col("account_id") <= "C0006").select(
+    "account_id", col("inv.invoice_id").alias("invoice_id")
+).orderBy("account_id").show()""",
+                "**80** filas. **5** `invoice_id` nulos (C0001–C0005). C0006 **sí** tiene id (`F0006-01`) aunque `lines` esté vacío.",
+            ),
+        *paso(
+                "5",
+                "Todavía más fino: grano **línea** (array dentro del array)",
+                """La línea de factura está embebida **otra vez** (`inv.lines`). Mismo truco.
+
+Copia:
+
+```
+explode de lines = ___ (112). Distinct facturas = ___ (72 = 75 − 3 vacías).
+C0006 desaparece de las líneas (tenía factura, cero lines).
+```""",
+                """lineas = inv_raw.select(
+    "account_id",
+    col("inv.invoice_id").alias("invoice_id"),
+    explode("inv.lines").alias("line"),
+).select(
+    "account_id",
+    "invoice_id",
+    col("line.sku").alias("sku"),
+    col("line.qty").alias("qty"),
+    col("line.amount").alias("amount"),
+)
+print("líneas", lineas.count())
+print("facturas distintas", lineas.select("invoice_id").distinct().count())
+print("¿está C0006?", lineas.where(col("account_id") == "C0006").count())
+lineas.where(col("account_id") == "C0007").show()""",
+                "`líneas 112`. Facturas distintas **72**. C0006 → **0** filas. C0007 enseña P007 / 10.7.",
+                "Tres granos: 40 cuentas, 75 facturas, 112 líneas. Mezclarlos en un `show` del JSON original es lo que “no se entiende”.",
+            ),
+        *paso(
+                "6",
+                "Cruzar **después** de ingerir (como si fueran relacionados)",
+                """Ya no hay JSON. Hay `cuentas` y `facturas` con `account_id`. Eso es M04.
+
+Copia:
+
+```
+inner  = ___ (75): solo quien tiene factura.
+left desde cuentas = ___ (80): las 5 sin factura quedan con invoice_id nulo.
+left ≠ inner. Si usas inner para un padrón de cuentas, pierdes C0001–C0005.
+```""",
+                """inner_ = cuentas.join(facturas, "account_id", "inner")
+left_ = cuentas.join(facturas, "account_id", "left")
+print("inner", inner_.count())
+print("left ", left_.count())
+print("left con factura nula", left_.where(col("invoice_id").isNull()).count())
+left_.where(col("account_id") <= "C0007").orderBy("account_id", "invoice_id").show()""",
+                "`inner 75` · `left 80` · nulos de factura **5**. En el `show`, C0001–C0005 salen con `invoice_id` null; C0006 y C0007 no.",
+                "El join lo armas tú. El dump embebido **no** traía dos ficheros.",
+            ),
+        *paso(
+                "7",
+                "KPI tras el cruce: GMV por cuenta (desde las **líneas**)",
+                """El dinero está en `lineas.amount`, no en la cuenta. Agrupas líneas y haces **left** a cuentas: quien no facturó sigue saliendo.
+
+Copia:
+
+```
+GMV nulo = ___ (6): 5 sin facturas + C0006 (factura sin líneas).
+Cuentas con GMV = 34. El inner del GMV las perdería.
+```""",
+                """gmv = lineas.groupBy("account_id").agg(fsum("amount").alias("gmv"))
+padron = cuentas.join(gmv, "account_id", "left")
+print("padrón", padron.count())
+print("GMV nulo", padron.where(col("gmv").isNull()).count())
+padron.where(col("gmv").isNull()).select("account_id", "n_invoices", "gmv").orderBy("account_id").show()
+padron.where(col("account_id") == "C0007").show()""",
+                "`padrón 40`. `GMV nulo` **6** (C0001–C0006). C0007 tiene GMV **10.7**.",
+                "Si haces inner cuentas ⋈ gmv, C0001–C0006 desaparecen del padrón. Mismo error que el inner de M04 con huérfanos.",
+            ),
+        *paso(
+                "8",
+                "Persistir las tablas y volver a cruzar (ya no es JSON)",
+                """Escribes tres Parquet en staging. Al releer, el join **no** sabe que un día fueron un documento. Eso es “tratarlo **tras** la ingesta”.
+
+Copia:
+
+```
+Releer cuentas/facturas/líneas: 40 / 75 / 112.
+left otra vez = 80. El origen embebido ya no está.
+```""",
+                """ensure_dirs()
+cuentas.write.mode("overwrite").parquet(str(STAGING / "billing_accounts"))
+facturas.write.mode("overwrite").parquet(str(STAGING / "billing_invoices"))
+lineas.write.mode("overwrite").parquet(str(STAGING / "billing_lines"))
+
+c2 = spark.read.parquet(str(STAGING / "billing_accounts"))
+f2 = spark.read.parquet(str(STAGING / "billing_invoices"))
+l2 = spark.read.parquet(str(STAGING / "billing_lines"))
+print("re-cuentas", c2.count(), "re-facturas", f2.count(), "re-líneas", l2.count())
+print("left tras Parquet", c2.join(f2, "account_id", "left").count())
+c2.join(f2, "account_id", "left").where(col("account_id") == "C0001").show()""",
+                "`40 75 112`. left **80**. C0001 releído con `invoice_id` nulo.",
+                "A partir de aquí el pipeline es el de siempre (join, KPI, Parquet). El JSON anidado ya hizo su trabajo.",
+            ),
+        md(
+            comprueba(
+                """Este bloque, rellenado (no un ensayo):
+
+```
+Dump embebido: 1 JSON = 1 cuenta, facturas dentro.
+Tras ingesta: cuentas 40, facturas 75, líneas 112.
+explode tira las 5 cuentas vacías; explode_outer las deja (80).
+inner join 75; left 80. GMV nulo 6 (5 sin factura + C0006 sin líneas).
+Parquet 40/75/112; el join posterior ya no ve el JSON.
+```"""
+            )
+        ),
+        *reto(
+                "Paid vs pending a grano factura",
+                "Sobre `facturas` (no sobre líneas): `groupBy(\"status\").count()`. Markdown: ¿cuántas `paid`? No uses `docs` ni `explode` otra vez: ya partiste el documento.",
+                """facturas.groupBy("status").count().orderBy("status").show()""",
+            ),
+        md(
+            errores(
+                [
+                    ("40 facturas", "No explotaste `invoices`", "`explode(\"invoices\")`"),
+                    ("explode = 40", "Usaste `size` o no el array", "`size` no duplica filas"),
+                    ("C0001 en facturas", "Usaste `explode_outer` y lo llamaste explode", "Inner explode las tira"),
+                    ("GMV nulo 5", "Olvidaste C0006 (factura sin líneas)", "El grano línea ≠ grano factura"),
+                    ("inner = left", "Todas las cuentas tenían array no vacío", "Este dump tiene 5 `[]`"),
+                    ("No está el jsonl", "Generador viejo", "`python3 scripts/generate_novashop.py`"),
+                ]
+            )
+        ),
+        md(siguiente("../M03-transformacion-datos/01-teoria.ipynb", "M03 — o vuelve al pipeline de pedidos")),
     ]

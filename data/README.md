@@ -21,6 +21,7 @@ Los recuentos oficiales están en `CANONICAL_COUNTS.json`.
 | `events.jsonl` | JSON Lines | 2500 | 80 sin `customer_id` |
 | `profiles_v1.jsonl` | JSON Lines | 100 | CRM 2023 **plano** (`fullName`). Extra M08. |
 | `profiles_v2.jsonl` | JSON Lines | 200 | CRM 2024 **anidado**. 50 ids solapan con v1; 8 sin `address.country`; 6 `orders_preview` vacío; 5 sin email work. |
+| `billing_embedded.jsonl` | JSON Lines | 40 | Facturación **embebida** (M08-02): cuenta + `invoices[]` + `lines[]`. 5 sin facturas; 3 facturas sin líneas; 4 `vat` nulos. |
 
 ## staging/ y curated/
 

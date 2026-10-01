@@ -30,6 +30,7 @@ def main() -> None:
     items = _items(rng, orders, products)
     events = _events(rng, customers, products, orders)
     profiles_v1, profiles_v2, profile_stats = _profiles(rng, customers)
+    billing_docs, billing_stats = _billing_embedded(customers)
 
     _write_customers(customers)
     _write_products(products)
@@ -38,8 +39,9 @@ def main() -> None:
     _write_events(events)
     _write_jsonl(RAW / "profiles_v1.jsonl", profiles_v1)
     _write_jsonl(RAW / "profiles_v2.jsonl", profiles_v2)
+    _write_jsonl(RAW / "billing_embedded.jsonl", billing_docs)
 
-    counts = _canonical(customers, products, orders, items, events, profile_stats)
+    counts = _canonical(customers, products, orders, items, events, {**profile_stats, **billing_stats})
     out = ROOT / "data" / "CANONICAL_COUNTS.json"
     out.write_text(json.dumps(counts, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     print(json.dumps(counts, indent=2, ensure_ascii=False))
@@ -271,7 +273,84 @@ def _profiles(rng: random.Random, customers: list[dict]) -> tuple[list[dict], li
     return v1, v2, stats
 
 
-def _canonical(customers, products, orders, items, events, profile_stats) -> dict:
+def _billing_embedded(customers: list[dict]) -> tuple[list[dict], dict]:
+    """Dump de facturación estilo CMS/Mongo: la factura vive DENTRO de la cuenta (embebido, no relacionado)."""
+    docs: list[dict] = []
+    n_invoices = 0
+    n_lines = 0
+    n_empty_invoices = 0
+    n_empty_lines = 0
+    n_vat_null = 0
+    empty_line_keys = {(6, 0), (11, 0), (31, 0)}
+    for c in customers:
+        n = int(c["customer_id"][1:])
+        if n > 40:
+            continue
+        country = c["country"] or "ES"
+        vat_null = n <= 4
+        if vat_null:
+            n_vat_null += 1
+        if n <= 5:
+            invoices: list[dict] = []
+            n_empty_invoices += 1
+        else:
+            n_inv = 1 if n <= 10 else (2 if n <= 30 else 3)
+            invoices = []
+            for k in range(n_inv):
+                if (n, k) in empty_line_keys:
+                    lines: list[dict] = []
+                    n_empty_lines += 1
+                else:
+                    n_ln = 1 if k == 0 else 2
+                    lines = [
+                        {
+                            "sku": f"P{((n + j - 1) % 60) + 1:03d}",
+                            "qty": j + 1,
+                            "amount": round(10.0 * (j + 1) + n * 0.1, 2),
+                        }
+                        for j in range(n_ln)
+                    ]
+                    n_lines += n_ln
+                invoices.append(
+                    {
+                        "invoice_id": f"F{n:04d}-{k + 1:02d}",
+                        "issued": f"2024-{(k % 12) + 1:02d}-15",
+                        "status": "paid" if k % 2 == 0 else "pending",
+                        "currency": "EUR",
+                        "lines": lines,
+                    }
+                )
+                n_invoices += 1
+        docs.append(
+            {
+                "account_id": c["customer_id"],
+                "account": {
+                    "legal_name": c["full_name"],
+                    "vat": None if vat_null else f"ESB{n:04d}",
+                    "billing": {
+                        "city": _CITY.get(country, "Madrid"),
+                        "country": country,
+                    },
+                },
+                "invoices": invoices,
+            }
+        )
+    stats = {
+        "billing_docs": len(docs),
+        "billing_invoices": n_invoices,
+        "billing_lines": n_lines,
+        "billing_empty_invoices": n_empty_invoices,
+        "billing_empty_lines": n_empty_lines,
+        "billing_vat_null": n_vat_null,
+        "billing_explode_invoices": n_invoices,
+        "billing_explode_outer_invoices": n_invoices + n_empty_invoices,
+        "billing_left_join_accounts": n_invoices + n_empty_invoices,
+        "billing_inner_join_accounts": n_invoices,
+    }
+    return docs, stats
+
+
+def _canonical(customers, products, orders, items, events, extra_stats) -> dict:
     empty_country = sum(1 for c in customers if not c["country"])
     empty_cust_order = sum(1 for o in orders if not o["CustomerId"])
     orphan_cust_order = sum(1 for o in orders if str(o["CustomerId"]).startswith("CX"))
@@ -301,7 +380,7 @@ def _canonical(customers, products, orders, items, events, profile_stats) -> dic
         "order_items_discount_gt_1": bad_discount,
         "events": len(events),
         "events_null_customer_id": events_no_cust,
-        **profile_stats,
+        **extra_stats,
         "m01_sample_paid": 3,
         "m02_orders_valid_customer_id": len(orders) - empty_cust_order,
         "fact_lines_after_order_inner": 1980,

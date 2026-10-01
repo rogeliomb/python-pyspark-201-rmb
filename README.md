@@ -79,11 +79,11 @@ Lees las fuentes reales de NovaShop. Quién decide nombres y tipos: Spark puede 
 
 **Extra — JSON anidado y schema que cambia**
 
-Los alumnos que vienen de CMS/CRM: un JSON de varios niveles, bajarlo a columnas, enriquecerlo y volver a un documento (el que comería una app o un `mongoimport`). Y dos dumps del mismo cliente (2023 plano vs 2024 anidado) cuando la migración se quedó a medias.
+Los alumnos que vienen de CMS/CRM: un JSON de varios niveles, bajarlo a columnas, enriquecerlo y volver a un documento (el que comería una app o un `mongoimport`). Dos dumps del mismo cliente (2023 plano vs 2024 anidado) cuando la migración se quedó a medias. Y el otro patrón: **facturas embebidas** en la cuenta (no relacionadas): ingerir el documento, montar dos DataFrames y cruzarlos *después*.
 
 No hay Mongo en el Codespace. El artefacto es JSONL. No sustituye el pipeline de pedidos.
 
-→ [teoría](notebooks/M08-json-anidado-schema/01-teoria.ipynb) · [lab](notebooks/M08-json-anidado-schema/02-lab-json-anidado-schema.ipynb)
+→ [teoría](notebooks/M08-json-anidado-schema/01-teoria.ipynb) · [schema legacy](notebooks/M08-json-anidado-schema/02-lab-json-anidado-schema.ipynb) · [facturas embebidas](notebooks/M08-json-anidado-schema/03-lab-embedding-facturas.ipynb)
 
 ### M03 — Transformación de datos
 

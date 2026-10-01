@@ -38,6 +38,7 @@ SPECS = [
     ("M07-persistencia-datos/02-lab-parquet-layout.ipynb", labs_late.m07_01),
     ("M08-json-anidado-schema/01-teoria.ipynb", m08.teoria),
     ("M08-json-anidado-schema/02-lab-json-anidado-schema.ipynb", m08.lab),
+    ("M08-json-anidado-schema/03-lab-embedding-facturas.ipynb", m08.lab_embed),
 ]
 
 
